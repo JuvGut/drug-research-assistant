@@ -2,9 +2,9 @@
 
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
-import numpy as np
-from typing import Optional, List, Dict
 import io
+import base64
+from typing import Dict, Optional
 
 class MoleculeAnalyzer:
     def __init__(self):
@@ -19,16 +19,21 @@ class MoleculeAnalyzer:
             return False
             
     def generate_2d_image(self) -> Optional[bytes]:
-        """Generate 2D molecule image"""
+        """Generate 2D molecule image and return as bytes"""
         if self.mol is None:
             return None
             
         try:
+            # Create the image
             img = Draw.MolToImage(self.mol)
+            
+            # Convert to bytes
             img_bytes = io.BytesIO()
             img.save(img_bytes, format='PNG')
             return img_bytes.getvalue()
-        except Exception:
+            
+        except Exception as e:
+            print(f"Error generating image: {str(e)}")
             return None
             
     def calculate_properties(self) -> Dict:

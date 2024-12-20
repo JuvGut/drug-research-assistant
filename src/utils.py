@@ -2,7 +2,7 @@
 
 import aiohttp
 import asyncio
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 import json
 import os
 import time
@@ -17,24 +17,68 @@ class APIClient:
             raise ValueError("API key is required but not provided. Please check your .env file.")
         self.api_key = api_key
         self._session = None
+        self._connector = None
         
-    @property
-    async def session(self):
+    async def _get_connector(self):
+        if self._connector is None:
+            self._connector = aiohttp.TCPConnector(
+                limit=10,
+                ttl_dns_cache=300,
+                use_dns_cache=True
+            )
+        return self._connector
+        
+    async def _get_session(self):
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
+            connector = await self._get_connector()
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={'Connection': 'keep-alive'}
+            )
         return self._session
-        
+
     def _build_url(self, endpoint: str) -> str:
         return f"{self.base_url}/{endpoint.lstrip('/')}"
         
     def _add_api_key(self, params: Dict) -> Dict:
-        """Add API key to parameters"""
         if not self.api_key:
             raise ValueError("API key is not configured. Please check your .env file.")
         params['api_key'] = self.api_key
         return params
+
+    async def batch_get(self, requests: List[Dict]) -> List[Dict]:
+        """Execute multiple requests concurrently"""
+        session = await self._get_session()
+        async with session:
+            tasks = []
+            for req in requests:
+                endpoint = req.get('endpoint', '')
+                params = req.get('params', {})
+                params = self._add_api_key(params)
+                url = self._build_url(endpoint)
+                
+                tasks.append(self._single_request(session, url, params))
+            
+            return await asyncio.gather(*tasks, return_exceptions=True)
+            
+    async def _single_request(self, session, url: str, params: Dict) -> Dict:
+        """Execute a single request with retry logic"""
+        retries = 3
+        delay = 1
         
+        for attempt in range(retries):
+            try:
+                async with session.get(url, params=params) as response:
+                    response.raise_for_status()
+                    return await response.json()
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise
+                await asyncio.sleep(delay * (2 ** attempt))
+
     async def get(self, endpoint: str, params: Dict = None, response_format: str = 'json') -> Union[Dict, str]:
+        """Make GET request to API endpoint"""
         if params is None:
             params = {}
             
@@ -42,7 +86,7 @@ class APIClient:
         url = self._build_url(endpoint)
         
         try:
-            current_session = await self.session
+            current_session = await self._get_session()
             async with current_session.get(url, params=params, timeout=30) as response:
                 try:
                     response.raise_for_status()
@@ -54,7 +98,6 @@ class APIClient:
                     else:
                         return await response.text()
                 except aiohttp.ContentTypeError:
-                    # Handle cases where response format doesn't match expected
                     text = await response.text()
                     if response_format == 'json':
                         try:
@@ -76,7 +119,7 @@ class APIClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
-
+        
 class Cache:
     def __init__(self, cache_dir: str, expiry: int):
         self.cache_dir = cache_dir
