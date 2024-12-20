@@ -1,7 +1,7 @@
 # src/config.py
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 
 @dataclass
@@ -12,14 +12,14 @@ class Config:
     
     # API configurations
     PUBMED_BASE_URL: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
-    PUBMED_API_KEY: str = os.getenv("PUBMED_API_KEY", "")
+    PUBMED_API_KEY: str = field(default_factory=lambda: os.getenv("PUBMED_API_KEY", "476e2e8a35e7913eaf20bead3a1123be9f09"))
     
     # Analysis parameters
     MAX_RESULTS: int = 10
     DEFAULT_SIMILARITY_K: int = 3
     
     # Query types
-    ANALYSIS_TYPES: List[str] = [
+    ANALYSIS_TYPES: List[str] = field(default_factory=lambda: [
         "mechanism of action",
         "clinical trials summary",
         "adverse effects",
@@ -30,7 +30,7 @@ class Config:
         "contraindications",
         "patient outcomes",
         "cost effectiveness"
-    ]
+    ])
     
     # Cache settings
     CACHE_DIR: str = ".cache"

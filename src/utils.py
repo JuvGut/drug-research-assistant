@@ -1,12 +1,64 @@
 # src/utils.py
 
+import aiohttp
+import asyncio
+from typing import Dict, Any, Optional, Union
 import json
 import os
 import time
-from typing import Dict, Any, Optional
-import requests
-from datetime import datetime
 import hashlib
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+
+class APIClient:
+    def __init__(self, base_url: str, api_key: str = None):
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.session = None
+        
+    async def _get_session(self):
+        if self.session is None:
+            self.session = aiohttp.ClientSession()
+        return self.session
+        
+    def _build_url(self, endpoint: str) -> str:
+        """Build full URL for API endpoint"""
+        return f"{self.base_url}/{endpoint.lstrip('/')}"
+        
+    def _add_api_key(self, params: Dict) -> Dict:
+        """Add API key to parameters if available"""
+        if self.api_key:
+            params['api_key'] = self.api_key
+        return params
+        
+    async def get(self, endpoint: str, params: Dict = None, response_format: str = 'json') -> Union[Dict, str]:
+        """Make GET request to API endpoint"""
+        if params is None:
+            params = {}
+            
+        params = self._add_api_key(params)
+        url = self._build_url(endpoint)
+        
+        session = await self._get_session()
+        try:
+            async with session.get(url, params=params, timeout=10) as response:
+                response.raise_for_status()
+                
+                if response_format == 'json':
+                    return await response.json()
+                elif response_format == 'xml':
+                    return await response.text()
+                else:
+                    return await response.text()
+                    
+        except Exception as e:
+            raise Exception(f"API request failed: {str(e)}")
+
+    async def close(self):
+        """Close the aiohttp session"""
+        if self.session is not None:
+            await self.session.close()
+            self.session = None
 
 class Cache:
     def __init__(self, cache_dir: str, expiry: int):
@@ -52,34 +104,3 @@ class Cache:
                 json.dump(cache_data, f)
         except Exception:
             pass
-
-class APIClient:
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
-        self.base_url = base_url.rstrip('/')
-        self.api_key = api_key
-        self.session = requests.Session()
-        
-    def _build_url(self, endpoint: str) -> str:
-        """Build full URL for API endpoint"""
-        return f"{self.base_url}/{endpoint.lstrip('/')}"
-        
-    def _add_api_key(self, params: Dict) -> Dict:
-        """Add API key to parameters if available"""
-        if self.api_key:
-            params['api_key'] = self.api_key
-        return params
-        
-    async def get(self, endpoint: str, params: Dict = None) -> Dict:
-        """Make GET request to API endpoint"""
-        if params is None:
-            params = {}
-            
-        params = self._add_api_key(params)
-        url = self._build_url(endpoint)
-        
-        try:
-            response = self.session.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            raise Exception(f"API request failed: {str(e)}")

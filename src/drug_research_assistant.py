@@ -7,10 +7,79 @@ import base64
 from datetime import datetime
 from typing import List, Dict, Optional
 import io
+import torch
+from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+from bs4 import BeautifulSoup
 
 from config import Config
 from models import MoleculeAnalyzer
 from utils import Cache, APIClient
+
+def get_device():
+    """Determine the best available device"""
+    if torch.cuda.is_available():
+        return "cuda"
+    elif torch.backends.mps.is_available():
+        # Check MPS backend status
+        if torch.backends.mps.is_built():
+            try:
+                # Test MPS availability
+                torch.zeros(1).to("mps")
+                return "mps"
+            except Exception:
+                st.warning("MPS (Metal Performance Shaders) is available but not working properly. Falling back to CPU.")
+                return "cpu"
+    return "cpu"
+
+@st.cache_resource
+def load_llm():
+    """Initialize the language model with proper accelerate integration"""
+    try:
+        model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        device = get_device()
+        st.info(f"Using device: {device}")
+        
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        
+        # Load model with accelerate
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float32,  # Using float32 for better compatibility
+            device_map="auto"  # Let accelerate handle device placement
+        )
+        
+        # Create pipeline without specifying device
+        pipe = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=tokenizer,
+            max_length=2048,
+            temperature=0.3,
+            top_p=0.95,
+            repetition_penalty=1.15
+            # Removed device parameter to let accelerate handle it
+        )
+        return HuggingFacePipeline(pipeline=pipe)
+    except Exception as e:
+        st.error(f"Error loading language model: {str(e)}")
+        return None
+
+@st.cache_resource
+def load_embeddings():
+    """Initialize the embeddings model with proper error handling"""
+    try:
+        device = get_device()
+        model_kwargs = {'device': device if device != "mps" else "cpu"}
+        
+        return HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs=model_kwargs,
+            encode_kwargs={'device': device if device != "mps" else "cpu"}
+        )
+    except Exception as e:
+        st.error(f"Error loading embeddings model: {str(e)}")
+        return None
 
 class DrugResearchAssistant:
     def __init__(self):
@@ -19,6 +88,88 @@ class DrugResearchAssistant:
         self.api_client = APIClient(self.config.PUBMED_BASE_URL, self.config.PUBMED_API_KEY)
         self.molecule_analyzer = MoleculeAnalyzer()
         self.initialize_models()
+
+    async def fetch_pubmed_data(self, drug_name: str) -> List[Dict]:
+        """Fetch research papers from PubMed"""
+        try:
+        # First, search for papers (JSON endpoint)
+            search_params = {
+                'db': 'pubmed',
+                'term': drug_name,
+                'retmax': str(self.config.MAX_RESULTS),
+                'format': 'json'
+            }
+        
+            search_response = await self.api_client.get(
+            'esearch.fcgi',
+            search_params,
+            response_format='json'
+            )
+        
+            if not search_response.get('esearchresult', {}).get('idlist', []):
+                return []
+            
+            # Fetch paper details (XML endpoint)
+            ids = search_response['esearchresult']['idlist']
+            fetch_params = {
+                'db': 'pubmed',
+                'id': ','.join(ids),
+                'rettype': 'abstract',
+                'retmode': 'xml'
+            }
+            
+            xml_response = await self.api_client.get(
+                'efetch.fcgi',
+                fetch_params,
+                response_format='xml'
+            )
+            
+            # Parse XML response
+            soup = BeautifulSoup(xml_response, 'xml')
+            results = []
+        
+            for article in soup.find_all('PubmedArticle'):
+                try:
+                    # Extract title
+                    title_elem = article.find('ArticleTitle')
+                    title = title_elem.text if title_elem else ''
+                    
+                    # Extract abstract
+                    abstract_elem = article.find('Abstract')
+                    abstract = abstract_elem.text if abstract_elem else ''
+                    
+                    if title and abstract:
+                        results.append({
+                            'title': title,
+                            'text': abstract
+                        })
+                except Exception as e:
+                    st.warning(f"Error parsing article: {str(e)}")
+                    continue
+            
+            return results
+            
+        except Exception as e:
+            st.error(f"Error fetching PubMed data: {str(e)}")
+            return []
+
+    async def fetch_clinical_trials(self, drug_name: str) -> List[Dict]:
+        """Fetch clinical trials data"""
+        try:
+            # Placeholder for clinical trials API integration
+            return []
+        except Exception as e:
+            st.error(f"Error fetching clinical trials: {str(e)}")
+            return []
+
+    async def fetch_drug_interactions(self, drug_name: str) -> List[Dict]:
+        """Fetch drug interaction data"""
+        try:
+            # Placeholder for drug interactions API integration
+            return []
+        except Exception as e:
+            st.error(f"Error fetching drug interactions: {str(e)}")
+            return []
 
     def initialize_models(self):
         """Initialize AI models with proper error handling"""
@@ -142,6 +293,9 @@ def main():
     if 'assistant' not in st.session_state:
         st.session_state.assistant = DrugResearchAssistant()
         
+    # Create config instance
+    config = Config()
+
     # Sidebar
     with st.sidebar:
         st.header("Analysis Options")
@@ -149,7 +303,7 @@ def main():
         smiles = st.text_input("SMILES Notation (optional)", "")
         analysis_type = st.multiselect(
             "Analysis Types",
-            Config.ANALYSIS_TYPES,
+            config.ANALYSIS_TYPES,  # Using instance instead of class
             default=["mechanism of action"]
         )
         
