@@ -3,6 +3,10 @@
 import os
 from dataclasses import dataclass, field
 from typing import List
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 @dataclass
 class Config:
@@ -12,7 +16,7 @@ class Config:
     
     # API configurations
     PUBMED_BASE_URL: str = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
-    PUBMED_API_KEY: str = field(default_factory=lambda: os.getenv("PUBMED_API_KEY", "476e2e8a35e7913eaf20bead3a1123be9f09"))
+    PUBMED_API_KEY: str = field(default_factory=lambda: os.getenv("PUBMED_API_KEY"))
     
     # Analysis parameters
     MAX_RESULTS: int = 10

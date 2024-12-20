@@ -11,6 +11,10 @@ import torch
 from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from bs4 import BeautifulSoup
+import psutil
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from config import Config
 from models import MoleculeAnalyzer
@@ -32,10 +36,22 @@ def get_device():
                 return "cpu"
     return "cpu"
 
+def check_available_memory():
+    """Check if enough memory is available for model loading"""
+    memory = psutil.virtual_memory()
+    available_gb = memory.available / (1024 * 1024 * 1024)  # Convert to GB
+    return available_gb
+
 @st.cache_resource
 def load_llm():
     """Initialize the language model with proper accelerate integration"""
     try:
+        # Check available memory before loading
+        available_memory = check_available_memory()
+        if available_memory < 4:  # Require at least 4GB free
+            st.error(f"Insufficient memory available ({available_memory:.1f}GB). Need at least 4GB.")
+            return None
+        
         model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
         device = get_device()
         st.info(f"Using device: {device}")
@@ -46,7 +62,7 @@ def load_llm():
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
             torch_dtype=torch.float32,  # Using float32 for better compatibility
-            device_map="auto"  # Let accelerate handle device placement
+            device_map="auto"
         )
         
         # Create pipeline without specifying device
@@ -299,7 +315,7 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("Analysis Options")
-        drug_name = st.text_input("Drug Name", "imatinib")
+        drug_name = st.text_input("Drug Name", "paracetamol")
         smiles = st.text_input("SMILES Notation (optional)", "")
         analysis_type = st.multiselect(
             "Analysis Types",
@@ -319,67 +335,96 @@ def main():
     if st.button("Analyze Drug"):
         with st.spinner("Analyzing drug data..."):
             # Create tabs for different analysis sections
-            tabs = st.tabs([
-                "Overview",
-                "Molecular Analysis",
-                "Research Findings",
-                "Clinical Trials",
-                "Export"
-            ])
-            
-            # Fetch and analyze data
-            drug_data = asyncio.run(st.session_state.assistant.fetch_drug_data(drug_name))
-            
-            # Overview tab
-            with tabs[0]:
-                st.header("Drug Overview")
-                st.write(drug_data.get('overview', 'No overview data available'))
+            try:
+                # Create event loop and run async function
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                drug_data = loop.run_until_complete(
+                    st.session_state.assistant.fetch_drug_data(drug_name)
+                )
+                loop.close()
                 
-            # Molecular Analysis tab
-            with tabs[1]:
-                if smiles:
-                    mol_analysis = st.session_state.assistant.analyze_molecular_properties(smiles)
-                    if 'error' not in mol_analysis:
-                        st.subheader("Molecular Properties")
-                        st.write(mol_analysis['properties'])
-                        
-                        st.subheader("Lipinski's Rule of Five")
-                        st.write(mol_analysis['lipinski'])
-                        
-                        if mol_analysis.get('structure_image'):
-                            st.image(mol_analysis['structure_image'])
+                # Create tabs for different analysis sections
+                tab_overview, tab_molecular, tab_research, tab_trials, tab_export = st.tabs([
+                    "Overview",
+                    "Molecular Analysis",
+                    "Research Findings",
+                    "Clinical Trials",
+                    "Export"
+                ])
+                
+                # Overview tab
+                with tab_overview:
+                    st.header("Drug Overview")
+                    if drug_data:
+                        st.write(drug_data.get('overview', 'Overview being generated...'))
                     else:
-                        st.error(mol_analysis['error'])
-                else:
-                    st.info("Enter SMILES notation for molecular analysis")
+                        st.warning("No data available")
                     
-            # Research Findings tab
-            with tabs[2]:
-                st.header("Research Findings")
-                for finding in drug_data.get('pubmed_data', []):
-                    st.subheader(finding['title'])
-                    st.write(finding['text'])
+                # Molecular Analysis tab
+                with tab_molecular:
+                    if smiles:
+                        mol_analysis = st.session_state.assistant.analyze_molecular_properties(smiles)
+                        if 'error' not in mol_analysis:
+                            col1, col2 = st.columns([1, 1])
+                            
+                            with col1:
+                                st.subheader("Molecular Properties")
+                                for prop, value in mol_analysis['properties'].items():
+                                    st.write(f"{prop}: {value:.2f}" if isinstance(value, float) else f"{prop}: {value}")
+                            
+                            with col2:
+                                st.subheader("Lipinski's Rule of Five")
+                                for rule, passes in mol_analysis['lipinski'].items():
+                                    st.write(f"{rule}: {'✅' if passes else '❌'}")
+                            
+                            if mol_analysis.get('structure_image'):
+                                st.image(
+                                    mol_analysis['structure_image'],
+                                    caption="Molecular Structure",
+                                    use_column_width=True
+                                )
+                        else:
+                            st.error(mol_analysis['error'])
+                    else:
+                        st.info("Enter SMILES notation for molecular analysis")
                     
-            # Clinical Trials tab
-            with tabs[3]:
-                st.header("Clinical Trials")
-                trials_df = pd.DataFrame(drug_data.get('clinical_trials', []))
-                if not trials_df.empty:
-                    st.dataframe(trials_df)
-                else:
-                    st.info("No clinical trials data available")
+                # Research Findings tab
+                with tab_research:
+                    st.header("Research Findings")
+                    if drug_data.get('pubmed_data'):
+                        for idx, finding in enumerate(drug_data['pubmed_data']):
+                            with st.expander(f"📄 {finding['title']}", expanded=idx==0):
+                                st.write(finding['text'])
+                    else:
+                        st.info("No research findings available")
                     
-            # Export tab
-            with tabs[4]:
-                st.header("Export Data")
-                export_data = st.session_state.assistant.export_data(drug_data, export_format)
-                if export_data:
-                    st.download_button(
-                        label=f"Download {export_format.upper()}",
-                        data=export_data,
-                        file_name=f"{drug_name}_analysis.{export_format}",
-                        mime=f"application/{export_format}"
-                    )
+                # Clinical Trials tab
+                with tab_trials:
+                    st.header("Clinical Trials")
+                    if drug_data.get('clinical_trials'):
+                        trials_df = pd.DataFrame(drug_data['clinical_trials'])
+                        st.dataframe(trials_df, use_container_width=True)
+                    else:
+                        st.info("No clinical trials data available")
+                    
+                # Export tab
+                with tab_export:
+                    st.header("Export Data")
+                    if drug_data:
+                        export_data = st.session_state.assistant.export_data(drug_data, export_format)
+                        if export_data:
+                            st.download_button(
+                                label=f"Download {export_format.upper()}",
+                                data=export_data,
+                                file_name=f"{drug_name}_analysis.{export_format}",
+                                mime=f"application/{export_format}"
+                            )
+                    else:
+                        st.warning("No data available to export")
+                        
+            except Exception as e:
+                st.error(f"Error during analysis: {str(e)}")
 
 if __name__ == "__main__":
     main()

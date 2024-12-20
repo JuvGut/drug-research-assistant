@@ -13,52 +13,69 @@ import xml.etree.ElementTree as ET
 class APIClient:
     def __init__(self, base_url: str, api_key: str = None):
         self.base_url = base_url.rstrip('/')
+        if not api_key:
+            raise ValueError("API key is required but not provided. Please check your .env file.")
         self.api_key = api_key
-        self.session = None
+        self._session = None
         
-    async def _get_session(self):
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-        return self.session
+    @property
+    async def session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
         
     def _build_url(self, endpoint: str) -> str:
-        """Build full URL for API endpoint"""
         return f"{self.base_url}/{endpoint.lstrip('/')}"
         
     def _add_api_key(self, params: Dict) -> Dict:
-        """Add API key to parameters if available"""
-        if self.api_key:
-            params['api_key'] = self.api_key
+        """Add API key to parameters"""
+        if not self.api_key:
+            raise ValueError("API key is not configured. Please check your .env file.")
+        params['api_key'] = self.api_key
         return params
         
     async def get(self, endpoint: str, params: Dict = None, response_format: str = 'json') -> Union[Dict, str]:
-        """Make GET request to API endpoint"""
         if params is None:
             params = {}
             
         params = self._add_api_key(params)
         url = self._build_url(endpoint)
         
-        session = await self._get_session()
         try:
-            async with session.get(url, params=params, timeout=10) as response:
-                response.raise_for_status()
-                
-                if response_format == 'json':
-                    return await response.json()
-                elif response_format == 'xml':
-                    return await response.text()
-                else:
-                    return await response.text()
+            current_session = await self.session
+            async with current_session.get(url, params=params, timeout=30) as response:
+                try:
+                    response.raise_for_status()
+                    
+                    if response_format == 'json':
+                        return await response.json()
+                    elif response_format == 'xml':
+                        return await response.text()
+                    else:
+                        return await response.text()
+                except aiohttp.ContentTypeError:
+                    # Handle cases where response format doesn't match expected
+                    text = await response.text()
+                    if response_format == 'json':
+                        try:
+                            return json.loads(text)
+                        except json.JSONDecodeError:
+                            raise Exception(f"Invalid JSON response: {text[:200]}...")
+                    return text
                     
         except Exception as e:
             raise Exception(f"API request failed: {str(e)}")
 
     async def close(self):
-        """Close the aiohttp session"""
-        if self.session is not None:
-            await self.session.close()
-            self.session = None
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
 
 class Cache:
     def __init__(self, cache_dir: str, expiry: int):
