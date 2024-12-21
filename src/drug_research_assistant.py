@@ -7,6 +7,7 @@ import base64
 from datetime import datetime
 from typing import List, Dict, Optional
 import io
+import json
 import torch
 from langchain_huggingface import HuggingFacePipeline, HuggingFaceEmbeddings
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
@@ -107,10 +108,26 @@ class DrugResearchAssistant:
         self.molecule_analyzer = MoleculeAnalyzer()
         self.initialize_models()
 
+    def initialize_models(self):
+        """Initialize AI models with proper error handling"""
+        try:
+            with st.spinner("Loading AI models..."):
+                self.llm = load_llm()
+                self.embeddings = load_embeddings()
+                self.initialized = bool(self.llm and self.embeddings)
+                
+                if self.initialized:
+                    st.success("Models loaded successfully!")
+                else:
+                    st.error("Failed to initialize models")
+        except Exception as e:
+            st.error(f"Error initializing models: {str(e)}")
+            self.initialized = False
+
     async def fetch_pubmed_data(self, drug_name: str) -> List[Dict]:
         """Fetch research papers from PubMed"""
         try:
-        # First, search for papers (JSON endpoint)
+            # First, search for papers (JSON endpoint)
             search_params = {
                 'db': 'pubmed',
                 'term': drug_name,
@@ -119,9 +136,9 @@ class DrugResearchAssistant:
             }
         
             search_response = await self.api_client.get(
-            'esearch.fcgi',
-            search_params,
-            response_format='json'
+                'esearch.fcgi',
+                search_params,
+                response_format='json'
             )
         
             if not search_response.get('esearchresult', {}).get('idlist', []):
@@ -148,11 +165,9 @@ class DrugResearchAssistant:
         
             for article in soup.find_all('PubmedArticle'):
                 try:
-                    # Extract title
                     title_elem = article.find('ArticleTitle')
                     title = title_elem.text if title_elem else ''
                     
-                    # Extract abstract
                     abstract_elem = article.find('Abstract')
                     abstract = abstract_elem.text if abstract_elem else ''
                     
@@ -171,42 +186,8 @@ class DrugResearchAssistant:
             st.error(f"Error fetching PubMed data: {str(e)}")
             return []
 
-    async def fetch_clinical_trials(self, drug_name: str) -> List[Dict]:
-        """Fetch clinical trials data"""
-        try:
-            # Placeholder for clinical trials API integration
-            return []
-        except Exception as e:
-            st.error(f"Error fetching clinical trials: {str(e)}")
-            return []
-
-    async def fetch_drug_interactions(self, drug_name: str) -> List[Dict]:
-        """Fetch drug interaction data"""
-        try:
-            # Placeholder for drug interactions API integration
-            return []
-        except Exception as e:
-            st.error(f"Error fetching drug interactions: {str(e)}")
-            return []
-
-    def initialize_models(self):
-        """Initialize AI models with proper error handling"""
-        try:
-            with st.spinner("Loading AI models..."):
-                self.llm = load_llm()
-                self.embeddings = load_embeddings()
-                self.initialized = bool(self.llm and self.embeddings)
-                
-                if self.initialized:
-                    st.success("Models loaded successfully!")
-                else:
-                    st.error("Failed to initialize models")
-        except Exception as e:
-            st.error(f"Error initializing models: {str(e)}")
-            self.initialized = False
-
     async def fetch_drug_data(self, drug_name: str) -> Dict:
-        """Fetch comprehensive drug data from multiple sources with progress updates"""
+        """Fetch comprehensive drug data from multiple sources"""
         try:
             # Check cache first
             cache_key = f"drug_data_{drug_name}"
@@ -224,14 +205,10 @@ class DrugResearchAssistant:
             status_placeholder.text("Fetching clinical trials data...")
             trials_task = self.fetch_clinical_trials(drug_name)
             
-            status_placeholder.text("Fetching drug interactions...")
-            interactions_task = self.fetch_drug_interactions(drug_name)
-            
             # Wait for all tasks to complete
             results = await asyncio.gather(
                 pubmed_task, 
-                trials_task, 
-                interactions_task, 
+                trials_task,
                 return_exceptions=True
             )
             
@@ -240,11 +217,13 @@ class DrugResearchAssistant:
             drug_data = {
                 'pubmed_data': results[0] if not isinstance(results[0], Exception) else [],
                 'clinical_trials': results[1] if not isinstance(results[1], Exception) else [],
-                'drug_interactions': results[2] if not isinstance(results[2], Exception) else []
             }
             
+            # Generate overview using the new method
+            if drug_data['pubmed_data']:
+                drug_data['overview'] = self.generate_drug_overview(drug_data['pubmed_data'])
+            
             # Cache the results
-            status_placeholder.text("Caching results...")
             self.cache.set(cache_key, drug_data)
             
             # Clear the status
@@ -271,50 +250,124 @@ class DrugResearchAssistant:
             return {
                 'properties': properties,
                 'lipinski': lipinski,
-                'structure_image': image_bytes  # Now returns bytes directly
+                'structure_image': image_bytes
             }
         except Exception as e:
             return {'error': str(e)}
 
-    def generate_report(self, drug_name: str, analysis_data: Dict) -> str:
-        """Generate a comprehensive analysis report"""
-        try:
-            report = f"# Drug Analysis Report: {drug_name}\n\n"
-            report += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    def generate_drug_overview(self, pubmed_data: List[Dict]) -> str:
+        """Generate a comprehensive drug overview from PubMed data"""
+        if not pubmed_data:
+            return "No overview data available"
             
-            # Add molecular properties
-            if 'molecular_properties' in analysis_data:
-                report += "## Molecular Properties\n\n"
-                props = analysis_data['molecular_properties']
-                for key, value in props.items():
-                    report += f"- {key.replace('_', ' ').title()}: {value}\n"
-                    
-            # Add research findings
-            if 'research_findings' in analysis_data:
-                report += "\n## Research Findings\n\n"
-                findings = analysis_data['research_findings']
-                for finding in findings:
-                    report += f"### {finding['title']}\n{finding['text']}\n\n"
-                    
-            return report
+        # Combine all abstracts
+        all_text = " ".join([paper['text'] for paper in pubmed_data])
+        
+        prompt = f"""Based on the following research data, provide a concise overview that includes:
+        1. The drug's primary therapeutic uses
+        2. Its mechanism of action
+        3. Key benefits and potential risks
+        
+        Research data: {all_text[:1000]}...
+        """
+        
+        try:
+            if self.llm:
+                response = self.llm(prompt)
+                return response
+            return "Language model not available for overview generation"
         except Exception as e:
-            return f"Error generating report: {str(e)}"
+            return f"Error generating overview: {str(e)}"
+
+    def explain_lipinski_rules(self) -> str:
+        """Provide explanation of Lipinski's Rule of Five"""
+        return """
+        Lipinski's Rule of Five helps predict how likely a drug is to be absorbed by the body. The rules are:
+        • Molecular weight ≤ 500 daltons
+        • Lipophilicity (LogP) ≤ 5
+        • Hydrogen bond donors ≤ 5
+        • Hydrogen bond acceptors ≤ 10
+        
+        Meeting these criteria suggests better drug-like properties and oral bioavailability.
+        """
+
+    def summarize_research_findings(self, papers: List[Dict]) -> List[Dict]:
+        """Generate a summary of research findings"""
+        if not papers:
+            return "No research findings available"
+            
+        summary = []
+        for paper in papers[:3]:  # Summarize top 3 papers
+            prompt = f"""Provide a 2-3 sentence summary of the key findings from this research:
+            Title: {paper['title']}
+            Abstract: {paper['text']}
+            """
+            
+            try:
+                if self.llm:
+                    response = self.llm(prompt)
+                    summary.append({
+                        'title': paper['title'],
+                        'summary': response
+                    })
+            except Exception as e:
+                st.warning(f"Error summarizing paper: {str(e)}")
+                
+        return summary
+
+    async def fetch_clinical_trials(self, drug_name: str) -> List[Dict]:
+        """Enhanced clinical trials data fetching"""
+        try:
+            # For demo purposes, return mock data
+            return [
+                {
+                    'trial_id': 'NCT12345678',
+                    'phase': 'Phase 3',
+                    'status': 'Active',
+                    'participants': 500,
+                    'start_date': '2023-01-15',
+                    'completion_date': '2024-12-31',
+                    'description': 'Randomized controlled trial evaluating efficacy...'
+                },
+                {
+                    'trial_id': 'NCT87654321',
+                    'phase': 'Phase 2',
+                    'status': 'Recruiting',
+                    'participants': 200,
+                    'start_date': '2024-03-01',
+                    'completion_date': '2025-06-30',
+                    'description': 'Multi-center study investigating safety and efficacy...'
+                }
+            ]
+        except Exception as e:
+            st.error(f"Error fetching clinical trials: {str(e)}")
+            return []
 
     def export_data(self, data: Dict, format: str = 'csv') -> Optional[bytes]:
         """Export analysis data in various formats"""
         try:
+            # Prepare data for export
+            export_dict = {
+                'overview': data.get('overview', ''),
+                'research_findings': [
+                    {'title': f['title'], 'text': f['text']}
+                    for f in data.get('pubmed_data', [])
+                ],
+                'clinical_trials': data.get('clinical_trials', [])
+            }
+
             if format == 'csv':
-                df = pd.DataFrame(data)
+                df = pd.json_normalize(export_dict)
                 output = io.StringIO()
                 df.to_csv(output, index=False)
                 return output.getvalue().encode()
                 
             elif format == 'json':
-                return pd.DataFrame(data).to_json(orient='records').encode()
+                return json.dumps(export_dict, indent=2).encode()
                 
             elif format == 'pdf':
-                # Implement PDF export using reportlab or another PDF library
-                pass
+                # Placeholder for PDF export
+                return None
                 
         except Exception as e:
             st.error(f"Error exporting data: {str(e)}")
@@ -407,6 +460,7 @@ def main():
                         
                         with col2:
                             st.subheader("Lipinski's Rule of Five")
+                            st.info(st.session_state.assistant.explain_lipinski_rules())
                             for rule, passes in mol_analysis['lipinski'].items():
                                 st.write(f"{rule}: {'✅' if passes else '❌'}")
                         
@@ -426,9 +480,19 @@ def main():
                 status_text.text("Analyzing research findings...")
                 progress_bar.progress(75)
                 st.header("Research Findings")
-                for finding in drug_data.get('pubmed_data', []):
-                    with st.expander(f"📄 {finding['title']}", expanded=False):
-                        st.write(finding['text'])
+                summaries = st.session_state.assistant.summarize_research_findings(
+                    drug_data.get('pubmed_data', [])
+                )
+                if isinstance(summaries, list):
+                    for paper in summaries:
+                        with st.expander(f"📄 {paper['title']}", expanded=False):
+                            st.write(paper['summary'])
+                else:
+                    st.write(summaries)  # Show error message if summary failed
+                
+                # for finding in drug_data.get('pubmed_data', []):
+                #     with st.expander(f"📄 {finding['title']}", expanded=False):
+                #         st.write(finding['text'])
                     
             # Clinical Trials tab
             with tabs[3]:
